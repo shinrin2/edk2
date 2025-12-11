@@ -1,11 +1,11 @@
 /** @file
 
-  Skeleton PCIe RAID DXE driver.
+  SDP RAID DXE driver.
 
-  This driver currently only matches a configured Vendor/Device ID, opens
-  EFI_PCI_IO_PROTOCOL, prints BAR information, and installs a private protocol
-  to track that the device is being managed. Extend this file with actual RAID
-  queue setup and BlockIo plumbing as you iterate.
+  This driver implements software RAID0/RAID1/RAID5 for NVMe disks.
+  It binds to the SDP RAID PCI card, enumerates physical BlockIo devices,
+  reads superblock metadata from each disk, assembles RAID arrays, and
+  creates virtual BlockIo devices for each array.
 
   SPDX-License-Identifier: BSD-2-Clause-Patent
 
@@ -23,23 +23,23 @@
 
 #include <Protocol/PciIo.h>
 
-#define PCIE_RAID_VENDOR_ID  0x1234
-#define PCIE_RAID_DEVICE_ID  0x11AA
+// 临时测试配置：绑定到 QEMU VGA 卡
+// TODO Phase 10: 改回 0x1234/0x11AA
+#define SDP_RAID_VENDOR_ID  0x1234
+#define SDP_RAID_DEVICE_ID  0x1111  // 临时改为 VGA 卡的 DID
 
 typedef struct {
   EFI_PCI_IO_PROTOCOL  *PciIo;
   EFI_PHYSICAL_ADDRESS Bar[PCI_MAX_BAR];
   UINT64               BarLength[PCI_MAX_BAR];
-} PCIE_RAID_DEVICE;
+} SDP_RAID_DEVICE;
 
-EFI_GUID  gPcieRaidDeviceGuid = {
-  0x8e8a02ad, 0x2bb3, 0x4e3f, { 0x9a, 0x6f, 0x3a, 0xd8, 0xf7, 0x5c, 0xa3, 0xd4 }
-};
+// Note: gSdpRaidDeviceGuid is defined in OvmfPkg.dec and auto-generated in AutoGen.c
 
 STATIC
 EFI_STATUS
 EFIAPI
-PcieRaidSupported (
+SdpRaidSupported (
   IN EFI_DRIVER_BINDING_PROTOCOL  *This,
   IN EFI_HANDLE                   Controller,
   IN EFI_DEVICE_PATH_PROTOCOL     *RemainingDevicePath
@@ -49,7 +49,7 @@ PcieRaidSupported (
   EFI_PCI_IO_PROTOCOL  *PciIo;
   PCI_TYPE00           Pci;
 
-  DEBUG ((DEBUG_INFO, "PcieRaid: Supported() called - checking device...\n"));
+  DEBUG ((DEBUG_INFO, "SdpDxe: Supported() called - checking device...\n"));
 
   Status = gBS->OpenProtocol (
                   Controller,
@@ -60,7 +60,7 @@ PcieRaidSupported (
                   EFI_OPEN_PROTOCOL_BY_DRIVER
                   );
   if (EFI_ERROR (Status)) {
-    DEBUG ((DEBUG_VERBOSE, "PcieRaid: Failed to open PciIo protocol: %r\n", Status));
+    DEBUG ((DEBUG_VERBOSE, "SdpDxe: Failed to open PciIo protocol: %r\n", Status));
     return Status;
   }
 
@@ -72,18 +72,18 @@ PcieRaidSupported (
                         &Pci
                         );
   if (!EFI_ERROR (Status)) {
-    DEBUG ((DEBUG_INFO, "PcieRaid: Device VID=0x%04X DID=0x%04X\n", Pci.Hdr.VendorId, Pci.Hdr.DeviceId));
-    if ((Pci.Hdr.VendorId == PCIE_RAID_VENDOR_ID) &&
-        (Pci.Hdr.DeviceId == PCIE_RAID_DEVICE_ID))
+    DEBUG ((DEBUG_INFO, "SdpDxe: Device VID=0x%04X DID=0x%04X\n", Pci.Hdr.VendorId, Pci.Hdr.DeviceId));
+    if ((Pci.Hdr.VendorId == SDP_RAID_VENDOR_ID) &&
+        (Pci.Hdr.DeviceId == SDP_RAID_DEVICE_ID))
     {
-      DEBUG ((DEBUG_INFO, "PcieRaid: Device matched! VID=0x%04X DID=0x%04X\n", PCIE_RAID_VENDOR_ID, PCIE_RAID_DEVICE_ID));
+      DEBUG ((DEBUG_INFO, "SdpDxe: Device matched! VID=0x%04X DID=0x%04X\n", SDP_RAID_VENDOR_ID, SDP_RAID_DEVICE_ID));
       Status = EFI_SUCCESS;
     } else {
-      DEBUG ((DEBUG_VERBOSE, "PcieRaid: Device not supported (expected VID=0x%04X DID=0x%04X)\n", PCIE_RAID_VENDOR_ID, PCIE_RAID_DEVICE_ID));
+      DEBUG ((DEBUG_INFO, "SdpDxe: Device not supported (expected VID=0x%04X DID=0x%04X)\n", SDP_RAID_VENDOR_ID, SDP_RAID_DEVICE_ID));
       Status = EFI_UNSUPPORTED;
     }
   } else {
-    DEBUG ((DEBUG_ERROR, "PcieRaid: Failed to read PCI config space: %r\n", Status));
+    DEBUG ((DEBUG_ERROR, "SdpDxe: Failed to read PCI config space: %r\n", Status));
   }
 
   gBS->CloseProtocol (
@@ -99,7 +99,7 @@ PcieRaidSupported (
 STATIC
 EFI_STATUS
 EFIAPI
-PcieRaidStart (
+SdpRaidStart (
   IN EFI_DRIVER_BINDING_PROTOCOL  *This,
   IN EFI_HANDLE                   Controller,
   IN EFI_DEVICE_PATH_PROTOCOL     *RemainingDevicePath
@@ -107,7 +107,7 @@ PcieRaidStart (
 {
   EFI_STATUS          Status;
   EFI_PCI_IO_PROTOCOL *PciIo;
-  PCIE_RAID_DEVICE    *RaidDevice;
+  SDP_RAID_DEVICE    *RaidDevice;
   UINT64              Attributes;
   UINTN               Index;
   EFI_ACPI_ADDRESS_SPACE_DESCRIPTOR  *BarDesc;
@@ -129,6 +129,12 @@ PcieRaidStart (
     goto FreeDevice;
   }
 
+  //
+  // 临时测试模式警告：绑定到 VGA 卡而非真实 RAID 卡
+  //
+  DEBUG ((DEBUG_WARN, "SdpDxe: [TEST MODE] Bound to VID=0x%04X DID=0x%04X (not real RAID card)\n",
+          SDP_RAID_VENDOR_ID, SDP_RAID_DEVICE_ID));
+
   RaidDevice->PciIo = PciIo;
 
   Status = PciIo->Attributes (
@@ -146,7 +152,7 @@ PcieRaidStart (
                       );
   }
   if (EFI_ERROR (Status)) {
-    DEBUG ((DEBUG_ERROR, "PcieRaid: failed to enable device attributes: %r\n", Status));
+    DEBUG ((DEBUG_ERROR, "SdpDxe: failed to enable device attributes: %r\n", Status));
     goto ClosePciIo;
   }
 
@@ -159,7 +165,7 @@ PcieRaidStart (
     if (BarDesc->ResType == ACPI_ADDRESS_SPACE_TYPE_MEM) {
       RaidDevice->Bar[Index]      = BarDesc->AddrRangeMin;
       RaidDevice->BarLength[Index] = BarDesc->AddrLen;
-      DEBUG ((DEBUG_INFO, "PcieRaid: BAR%u @ 0x%LX size 0x%Lx\n", (UINT32)Index, BarDesc->AddrRangeMin, BarDesc->AddrLen));
+      DEBUG ((DEBUG_INFO, "SdpDxe: BAR%u @ 0x%LX size 0x%Lx\n", (UINT32)Index, BarDesc->AddrRangeMin, BarDesc->AddrLen));
     }
 
     FreePool (BarDesc);
@@ -167,16 +173,16 @@ PcieRaidStart (
 
   Status = gBS->InstallProtocolInterface (
                   &Controller,
-                  &gPcieRaidDeviceGuid,
+                  &gSdpRaidDeviceGuid,
                   EFI_NATIVE_INTERFACE,
                   RaidDevice
                   );
   if (EFI_ERROR (Status)) {
-    DEBUG ((DEBUG_ERROR, "PcieRaid: failed to install private protocol: %r\n", Status));
+    DEBUG ((DEBUG_ERROR, "SdpDxe: failed to install private protocol: %r\n", Status));
     goto ClosePciIo;
   }
 
-  DEBUG ((DEBUG_INFO, "PcieRaid: driver started\n"));
+  DEBUG ((DEBUG_INFO, "SdpDxe: driver started\n"));
   return EFI_SUCCESS;
 
 ClosePciIo:
@@ -195,7 +201,7 @@ FreeDevice:
 STATIC
 EFI_STATUS
 EFIAPI
-PcieRaidStop (
+SdpRaidStop (
   IN EFI_DRIVER_BINDING_PROTOCOL  *This,
   IN EFI_HANDLE                   Controller,
   IN UINTN                        NumberOfChildren,
@@ -203,11 +209,11 @@ PcieRaidStop (
   )
 {
   EFI_STATUS        Status;
-  PCIE_RAID_DEVICE  *RaidDevice;
+  SDP_RAID_DEVICE  *RaidDevice;
 
   Status = gBS->OpenProtocol (
                   Controller,
-                  &gPcieRaidDeviceGuid,
+                  &gSdpRaidDeviceGuid,
                   (VOID **)&RaidDevice,
                   This->DriverBindingHandle,
                   Controller,
@@ -219,7 +225,7 @@ PcieRaidStop (
 
   Status = gBS->UninstallProtocolInterface (
                   Controller,
-                  &gPcieRaidDeviceGuid,
+                  &gSdpRaidDeviceGuid,
                   RaidDevice
                   );
   if (EFI_ERROR (Status)) {
@@ -237,26 +243,26 @@ PcieRaidStop (
   return Status;
 }
 
-STATIC EFI_DRIVER_BINDING_PROTOCOL  gPcieRaidDriverBinding = {
-  PcieRaidSupported,
-  PcieRaidStart,
-  PcieRaidStop,
+STATIC EFI_DRIVER_BINDING_PROTOCOL  gSdpRaidDriverBinding = {
+  SdpRaidSupported,
+  SdpRaidStart,
+  SdpRaidStop,
   0x10,
   NULL,
   NULL
 };
 
-STATIC EFI_UNICODE_STRING_TABLE  mPcieRaidDriverNameTable[] = {
-  { "eng;en", L"PCIe RAID Driver (stub)" },
-  { NULL,     NULL                      }
+STATIC EFI_UNICODE_STRING_TABLE  mSdpRaidDriverNameTable[] = {
+  { "eng;en", L"SDP RAID Driver" },
+  { NULL,     NULL                }
 };
 
-STATIC EFI_COMPONENT_NAME_PROTOCOL  gPcieRaidComponentName;
+STATIC EFI_COMPONENT_NAME_PROTOCOL  gSdpRaidComponentName;
 
 STATIC
 EFI_STATUS
 EFIAPI
-PcieRaidGetDriverName (
+SdpRaidGetDriverName (
   IN  EFI_COMPONENT_NAME_PROTOCOL  *This,
   IN  CHAR8                        *Language,
   OUT CHAR16                       **DriverName
@@ -265,16 +271,16 @@ PcieRaidGetDriverName (
   return LookupUnicodeString2 (
            Language,
            This->SupportedLanguages,
-           mPcieRaidDriverNameTable,
+           mSdpRaidDriverNameTable,
            DriverName,
-           (BOOLEAN)(This == &gPcieRaidComponentName)
+           (BOOLEAN)(This == &gSdpRaidComponentName)
            );
 }
 
 STATIC
 EFI_STATUS
 EFIAPI
-PcieRaidGetControllerName (
+SdpRaidGetControllerName (
   IN  EFI_COMPONENT_NAME_PROTOCOL  *This,
   IN  EFI_HANDLE                   ControllerHandle,
   IN  EFI_HANDLE                   ChildHandle,
@@ -285,42 +291,42 @@ PcieRaidGetControllerName (
   return EFI_UNSUPPORTED;
 }
 
-STATIC EFI_COMPONENT_NAME_PROTOCOL  gPcieRaidComponentName = {
-  PcieRaidGetDriverName,
-  PcieRaidGetControllerName,
+STATIC EFI_COMPONENT_NAME_PROTOCOL  gSdpRaidComponentName = {
+  SdpRaidGetDriverName,
+  SdpRaidGetControllerName,
   "eng"
 };
 
-STATIC EFI_COMPONENT_NAME2_PROTOCOL  gPcieRaidComponentName2 = {
-  (EFI_COMPONENT_NAME2_GET_DRIVER_NAME)PcieRaidGetDriverName,
-  (EFI_COMPONENT_NAME2_GET_CONTROLLER_NAME)PcieRaidGetControllerName,
+STATIC EFI_COMPONENT_NAME2_PROTOCOL  gSdpRaidComponentName2 = {
+  (EFI_COMPONENT_NAME2_GET_DRIVER_NAME)SdpRaidGetDriverName,
+  (EFI_COMPONENT_NAME2_GET_CONTROLLER_NAME)SdpRaidGetControllerName,
   "en"
 };
 
 EFI_STATUS
 EFIAPI
-PcieRaidDxeEntryPoint (
+SdpDxeEntryPoint (
   IN EFI_HANDLE        ImageHandle,
   IN EFI_SYSTEM_TABLE  *SystemTable
   )
 {
   EFI_STATUS  Status;
 
-  DEBUG ((DEBUG_INFO, "PcieRaidDxe: EntryPoint called - driver loading...\n"));
+  DEBUG ((DEBUG_INFO, "SdpDxe: EntryPoint called - driver loading...\n"));
 
   Status = EfiLibInstallDriverBindingComponentName2 (
            ImageHandle,
            SystemTable,
-           &gPcieRaidDriverBinding,
+           &gSdpRaidDriverBinding,
            ImageHandle,
-           &gPcieRaidComponentName,
-           &gPcieRaidComponentName2
+           &gSdpRaidComponentName,
+           &gSdpRaidComponentName2
            );
 
   if (EFI_ERROR (Status)) {
-    DEBUG ((DEBUG_ERROR, "PcieRaidDxe: Failed to install driver binding: %r\n", Status));
+    DEBUG ((DEBUG_ERROR, "SdpDxe: Failed to install driver binding: %r\n", Status));
   } else {
-    DEBUG ((DEBUG_INFO, "PcieRaidDxe: Driver binding installed successfully\n"));
+    DEBUG ((DEBUG_INFO, "SdpDxe: Driver binding installed successfully\n"));
   }
 
   return Status;

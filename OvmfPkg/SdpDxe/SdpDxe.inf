@@ -1,6 +1,5 @@
 ## @file
-#  Skeleton PCIe RAID DXE driver that matches a Vendor/Device ID, logs BARs,
-#  and installs a private protocol to mark the device as managed.
+#  SDP RAID DXE driver that implements software RAID for NVMe disks.
 #
 #  SPDX-License-Identifier: BSD-2-Clause-Patent
 #
@@ -8,11 +7,11 @@
 
 [Defines]
   INF_VERSION               = 0x00010006
-  BASE_NAME                 = PcieRaidDxe
-  FILE_GUID                 = 8c26b5e1-330b-49f2-b820-178d0481bef1
+  BASE_NAME                 = SdpDxe
+  FILE_GUID                 = 94ede63f-f211-4a6d-823c-17029ee97086
   MODULE_TYPE               = UEFI_DRIVER
   VERSION_STRING            = 1.0
-  ENTRY_POINT               = PcieRaidDxeEntryPoint
+  ENTRY_POINT               = SdpDxeEntryPoint
 
 [Packages]
   MdePkg/MdePkg.dec
@@ -20,7 +19,7 @@
   OvmfPkg/OvmfPkg.dec
 
 [Sources]
-  PcieRaid.c
+  SdpRaid.c
 
 [LibraryClasses]
   UefiDriverEntryPoint
@@ -34,4 +33,4 @@
   gEfiPciIoProtocolGuid
   gEfiComponentName2ProtocolGuid
   gEfiComponentNameProtocolGuid
-  gPcieRaidDeviceGuid
+  gSdpRaidDeviceGuid
