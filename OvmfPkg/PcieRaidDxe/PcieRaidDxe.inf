@@ -1,0 +1,37 @@
+## @file
+#  Skeleton PCIe RAID DXE driver that matches a Vendor/Device ID, logs BARs,
+#  and installs a private protocol to mark the device as managed.
+#
+#  SPDX-License-Identifier: BSD-2-Clause-Patent
+#
+##
+
+[Defines]
+  INF_VERSION               = 0x00010006
+  BASE_NAME                 = PcieRaidDxe
+  FILE_GUID                 = 8c26b5e1-330b-49f2-b820-178d0481bef1
+  MODULE_TYPE               = UEFI_DRIVER
+  VERSION_STRING            = 1.0
+  ENTRY_POINT               = PcieRaidDxeEntryPoint
+
+[Packages]
+  MdePkg/MdePkg.dec
+  MdeModulePkg/MdeModulePkg.dec
+  OvmfPkg/OvmfPkg.dec
+
+[Sources]
+  PcieRaid.c
+
+[LibraryClasses]
+  UefiDriverEntryPoint
+  UefiBootServicesTableLib
+  MemoryAllocationLib
+  UefiLib
+  DebugLib
+
+[Protocols]
+  gEfiDriverBindingProtocolGuid
+  gEfiPciIoProtocolGuid
+  gEfiComponentName2ProtocolGuid
+  gEfiComponentNameProtocolGuid
+  gPcieRaidDeviceGuid

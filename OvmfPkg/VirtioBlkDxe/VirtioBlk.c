@@ -658,6 +658,8 @@ VirtioBlkDriverBindingSupported (
   EFI_STATUS              Status;
   VIRTIO_DEVICE_PROTOCOL  *VirtIo;
 
+  DEBUG ((DEBUG_VERBOSE, "VirtioBlk: Supported() called - checking device...\n"));
+
   //
   // Attempt to open the device with the VirtIo set of interfaces. On success,
   // the protocol is "instantiated" for the VirtIo device. Covers duplicate
@@ -674,11 +676,16 @@ VirtioBlkDriverBindingSupported (
                                               // the device; to be released
                   );
   if (EFI_ERROR (Status)) {
+    DEBUG ((DEBUG_VERBOSE, "VirtioBlk: Failed to open VirtIo protocol: %r\n", Status));
     return Status;
   }
 
   if (VirtIo->SubSystemDeviceId != VIRTIO_SUBSYSTEM_BLOCK_DEVICE) {
+    DEBUG ((DEBUG_VERBOSE, "VirtioBlk: Device not supported (SubSystemDeviceId=0x%04X, expected=0x%04X)\n",
+            VirtIo->SubSystemDeviceId, VIRTIO_SUBSYSTEM_BLOCK_DEVICE));
     Status = EFI_UNSUPPORTED;
+  } else {
+    DEBUG ((DEBUG_INFO, "VirtioBlk: Device matched! SubSystemDeviceId=0x%04X\n", VirtIo->SubSystemDeviceId));
   }
 
   //
@@ -1098,8 +1105,11 @@ VirtioBlkDriverBindingStart (
   VBLK_DEV    *Dev;
   EFI_STATUS  Status;
 
+  DEBUG ((DEBUG_INFO, "VirtioBlk: Start() called - initializing device...\n"));
+
   Dev = (VBLK_DEV *)AllocateZeroPool (sizeof *Dev);
   if (Dev == NULL) {
+    DEBUG ((DEBUG_ERROR, "VirtioBlk: Failed to allocate device structure\n"));
     return EFI_OUT_OF_RESOURCES;
   }
 
@@ -1145,9 +1155,11 @@ VirtioBlkDriverBindingStart (
                           &Dev->BlockIo
                           );
   if (EFI_ERROR (Status)) {
+    DEBUG ((DEBUG_ERROR, "VirtioBlk: Failed to install BlockIo protocol: %r\n", Status));
     goto CloseExitBoot;
   }
 
+  DEBUG ((DEBUG_INFO, "VirtioBlk: Driver started successfully - BlockIo protocol installed\n"));
   return EFI_SUCCESS;
 
 CloseExitBoot:
@@ -1337,12 +1349,24 @@ VirtioBlkEntryPoint (
   IN EFI_SYSTEM_TABLE  *SystemTable
   )
 {
-  return EfiLibInstallDriverBindingComponentName2 (
-           ImageHandle,
-           SystemTable,
-           &gDriverBinding,
-           ImageHandle,
-           &gComponentName,
-           &gComponentName2
-           );
+  EFI_STATUS  Status;
+
+  DEBUG ((DEBUG_INFO, "VirtioBlk: EntryPoint called - driver loading...\n"));
+
+  Status = EfiLibInstallDriverBindingComponentName2 (
+             ImageHandle,
+             SystemTable,
+             &gDriverBinding,
+             ImageHandle,
+             &gComponentName,
+             &gComponentName2
+             );
+
+  if (EFI_ERROR (Status)) {
+    DEBUG ((DEBUG_ERROR, "VirtioBlk: Failed to install driver binding: %r\n", Status));
+  } else {
+    DEBUG ((DEBUG_INFO, "VirtioBlk: Driver binding installed successfully\n"));
+  }
+
+  return Status;
 }
