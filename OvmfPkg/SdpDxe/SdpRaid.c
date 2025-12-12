@@ -11,28 +11,15 @@
 
 **/
 
-#include <Uefi.h>
+#include "SdpRaid.h"
 
 #include <IndustryStandard/Acpi.h>
 #include <IndustryStandard/Pci.h>
-
-#include <Library/DebugLib.h>
-#include <Library/MemoryAllocationLib.h>
-#include <Library/UefiBootServicesTableLib.h>
-#include <Library/UefiLib.h>
-
-#include <Protocol/PciIo.h>
 
 // 临时测试配置：绑定到 QEMU VGA 卡
 // TODO Phase 10: 改回 0x1234/0x11AA
 #define SDP_RAID_VENDOR_ID  0x1234
 #define SDP_RAID_DEVICE_ID  0x1111  // 临时改为 VGA 卡的 DID
-
-typedef struct {
-  EFI_PCI_IO_PROTOCOL  *PciIo;
-  EFI_PHYSICAL_ADDRESS Bar[PCI_MAX_BAR];
-  UINT64               BarLength[PCI_MAX_BAR];
-} SDP_RAID_DEVICE;
 
 // Note: gSdpRaidDeviceGuid is defined in OvmfPkg.dec and auto-generated in AutoGen.c
 
@@ -105,15 +92,13 @@ SdpRaidStart (
   IN EFI_DEVICE_PATH_PROTOCOL     *RemainingDevicePath
   )
 {
-  EFI_STATUS          Status;
-  EFI_PCI_IO_PROTOCOL *PciIo;
-  SDP_RAID_DEVICE    *RaidDevice;
-  UINT64              Attributes;
-  UINTN               Index;
-  EFI_ACPI_ADDRESS_SPACE_DESCRIPTOR  *BarDesc;
+  EFI_STATUS                      Status;
+  EFI_PCI_IO_PROTOCOL             *PciIo;
+  SDP_CONTROLLER_PRIVATE_DATA     *Private;
+  UINT64                          Attributes;
 
-  RaidDevice = AllocateZeroPool (sizeof (*RaidDevice));
-  if (RaidDevice == NULL) {
+  Private = AllocateZeroPool (sizeof (*Private));
+  if (Private == NULL) {
     return EFI_OUT_OF_RESOURCES;
   }
 
@@ -135,54 +120,69 @@ SdpRaidStart (
   DEBUG ((DEBUG_WARN, "SdpDxe: [TEST MODE] Bound to VID=0x%04X DID=0x%04X (not real RAID card)\n",
           SDP_RAID_VENDOR_ID, SDP_RAID_DEVICE_ID));
 
-  RaidDevice->PciIo = PciIo;
+  //
+  // Initialize controller private data
+  //
+  Private->Signature            = SDP_CONTROLLER_SIGNATURE;
+  Private->ControllerHandle     = Controller;
+  Private->DriverBindingHandle  = This->DriverBindingHandle;
+  Private->PciIo                = PciIo;
+  InitializeListHead (&Private->ArrayListHead);
 
+  //
+  // Phase 1 verification: Print structure sizes
+  //
+  DEBUG ((DEBUG_INFO, "SdpDxe: Phase 1 - Data structure sizes:\n"));
+  DEBUG ((DEBUG_INFO, "  SDP_SUPERBLOCK: %u bytes\n", sizeof (SDP_SUPERBLOCK)));
+  DEBUG ((DEBUG_INFO, "  SDP_MEMBER_DISK: %u bytes\n", sizeof (SDP_MEMBER_DISK)));
+  DEBUG ((DEBUG_INFO, "  SDP_ARRAY_PRIVATE_DATA: %u bytes\n", sizeof (SDP_ARRAY_PRIVATE_DATA)));
+  DEBUG ((DEBUG_INFO, "  SDP_CONTROLLER_PRIVATE_DATA: %u bytes\n", sizeof (SDP_CONTROLLER_PRIVATE_DATA)));
+
+  //
+  // Save original PCI attributes for restoration in Stop()
+  //
   Status = PciIo->Attributes (
                     PciIo,
                     EfiPciIoAttributeOperationGet,
                     0,
                     &Attributes
                     );
-  if (!EFI_ERROR (Status)) {
-    Status = PciIo->Attributes (
-                      PciIo,
-                      EfiPciIoAttributeOperationEnable,
-                      Attributes | EFI_PCI_DEVICE_ENABLE,
-                      NULL
-                      );
-  }
   if (EFI_ERROR (Status)) {
-    DEBUG ((DEBUG_ERROR, "SdpDxe: failed to enable device attributes: %r\n", Status));
+    DEBUG ((DEBUG_ERROR, "SdpDxe: Failed to get PCI attributes: %r\n", Status));
     goto ClosePciIo;
   }
 
-  for (Index = 0; Index < PCI_MAX_BAR; Index++) {
-    Status = PciIo->GetBarAttributes (PciIo, Index, NULL, (VOID **)&BarDesc);
-    if (EFI_ERROR (Status)) {
-      continue;
-    }
+  Private->OriginalPciAttributes = Attributes;
 
-    if (BarDesc->ResType == ACPI_ADDRESS_SPACE_TYPE_MEM) {
-      RaidDevice->Bar[Index]      = BarDesc->AddrRangeMin;
-      RaidDevice->BarLength[Index] = BarDesc->AddrLen;
-      DEBUG ((DEBUG_INFO, "SdpDxe: BAR%u @ 0x%LX size 0x%Lx\n", (UINT32)Index, BarDesc->AddrRangeMin, BarDesc->AddrLen));
-    }
-
-    FreePool (BarDesc);
+  //
+  // Enable PCI device
+  //
+  Status = PciIo->Attributes (
+                    PciIo,
+                    EfiPciIoAttributeOperationEnable,
+                    Attributes | EFI_PCI_DEVICE_ENABLE,
+                    NULL
+                    );
+  if (EFI_ERROR (Status)) {
+    DEBUG ((DEBUG_ERROR, "SdpDxe: Failed to enable device attributes: %r\n", Status));
+    goto ClosePciIo;
   }
 
+  //
+  // Install private protocol on controller handle
+  //
   Status = gBS->InstallProtocolInterface (
                   &Controller,
                   &gSdpRaidDeviceGuid,
                   EFI_NATIVE_INTERFACE,
-                  RaidDevice
+                  Private
                   );
   if (EFI_ERROR (Status)) {
-    DEBUG ((DEBUG_ERROR, "SdpDxe: failed to install private protocol: %r\n", Status));
+    DEBUG ((DEBUG_ERROR, "SdpDxe: Failed to install private protocol: %r\n", Status));
     goto ClosePciIo;
   }
 
-  DEBUG ((DEBUG_INFO, "SdpDxe: driver started\n"));
+  DEBUG ((DEBUG_INFO, "SdpDxe: Controller initialized successfully (Phase 1 complete)\n"));
   return EFI_SUCCESS;
 
 ClosePciIo:
@@ -194,7 +194,7 @@ ClosePciIo:
          );
 
 FreeDevice:
-  FreePool (RaidDevice);
+  FreePool (Private);
   return Status;
 }
 
@@ -208,13 +208,13 @@ SdpRaidStop (
   IN EFI_HANDLE                   *ChildHandleBuffer
   )
 {
-  EFI_STATUS        Status;
-  SDP_RAID_DEVICE  *RaidDevice;
+  EFI_STATUS                   Status;
+  SDP_CONTROLLER_PRIVATE_DATA  *Private;
 
   Status = gBS->OpenProtocol (
                   Controller,
                   &gSdpRaidDeviceGuid,
-                  (VOID **)&RaidDevice,
+                  (VOID **)&Private,
                   This->DriverBindingHandle,
                   Controller,
                   EFI_OPEN_PROTOCOL_GET_PROTOCOL
@@ -226,7 +226,7 @@ SdpRaidStop (
   Status = gBS->UninstallProtocolInterface (
                   Controller,
                   &gSdpRaidDeviceGuid,
-                  RaidDevice
+                  Private
                   );
   if (EFI_ERROR (Status)) {
     return Status;
@@ -239,7 +239,7 @@ SdpRaidStop (
                   Controller
                   );
 
-  FreePool (RaidDevice);
+  FreePool (Private);
   return Status;
 }
 
