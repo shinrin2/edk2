@@ -30,6 +30,8 @@
   DebugLib
   BaseLib
   BaseMemoryLib
+  DevicePathLib
+  PrintLib
 
 [Protocols]
   gEfiDriverBindingProtocolGuid
@@ -37,5 +39,10 @@
   gEfiComponentName2ProtocolGuid
   gEfiComponentNameProtocolGuid
   gEfiBlockIoProtocolGuid
+  gEfiDiskIoProtocolGuid           ## PRODUCES (for virtual RAID devices)
   gEfiDevicePathProtocolGuid
   gSdpRaidDeviceGuid
+  gSdpRaidVirtualDiskGuid          ## PRODUCES (tag to identify our virtual disks)
+
+[Guids]
+  gEfiEndOfDxeEventGroupGuid       ## CONSUMES (for diagnostics)

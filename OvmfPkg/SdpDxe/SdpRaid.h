@@ -14,12 +14,15 @@
 
 #include <Protocol/BlockIo.h>
 #include <Protocol/DevicePath.h>
+#include <Protocol/DiskIo.h>
 #include <Protocol/PciIo.h>
 
 #include <Library/BaseLib.h>
 #include <Library/BaseMemoryLib.h>
 #include <Library/DebugLib.h>
+#include <Library/DevicePathLib.h>
 #include <Library/MemoryAllocationLib.h>
+#include <Library/PrintLib.h>
 #include <Library/UefiBootServicesTableLib.h>
 #include <Library/UefiLib.h>
 
@@ -39,6 +42,11 @@
 #define SDP_RAID_LEVEL_0  0  // Striping
 #define SDP_RAID_LEVEL_1  1  // Mirroring
 #define SDP_RAID_LEVEL_5  5  // Parity
+
+//
+// Maximum number of members in a RAID array
+//
+#define SDP_MAX_MEMBERS  16
 
 //
 // Superblock structure (512 bytes, stored at last LBA of each member disk)
@@ -93,14 +101,52 @@ STATIC_ASSERT (
 
 //
 // Member disk structure (runtime data for each physical disk in a RAID array)
+// NOTE: For assembled arrays, we store Handle and get BlockIo via OpenProtocol when needed
 //
 typedef struct {
-  EFI_BLOCK_IO_PROTOCOL  *BlockIo;       // BlockIO protocol of physical disk
+  EFI_BLOCK_IO_PROTOCOL  *BlockIo;       // BlockIO protocol of physical disk (cached after assembly)
   EFI_HANDLE             Handle;         // Handle of physical disk
   UINT8                  MemberIndex;    // Index in array (from superblock)
   BOOLEAN                Present;        // TRUE if disk is present and healthy
   SDP_SUPERBLOCK         Superblock;     // Copy of superblock from this disk
 } SDP_MEMBER_DISK;
+
+//
+// Member info for pending arrays (Phase 4: event-based discovery)
+// Store Handle, NOT BlockIo pointer - protocols can be reinstalled
+//
+typedef struct {
+  EFI_HANDLE      Handle;         // Handle of physical disk
+  UINT8           MemberIndex;    // Index in array (from superblock)
+  BOOLEAN         Present;        // TRUE if this member slot is filled
+  SDP_SUPERBLOCK  Superblock;     // Copy of superblock from this disk
+} SDP_MEMBER_INFO;
+
+//
+// Pending RAID array (tracking members as they're discovered)
+// This structure is used during event-based discovery before assembly
+//
+typedef struct {
+  LIST_ENTRY       Link;                      // Link in global pending list
+  EFI_GUID         ArrayUuid;                 // UUID from superblock
+  UINT8            RaidLevel;                 // RAID level
+  UINT8            NumMembers;                // Expected total members
+  UINT32           StripeSize;                // Stripe size (for consistency check)
+  UINT8            FoundCount;                // Members discovered so far
+  SDP_MEMBER_INFO  Members[SDP_MAX_MEMBERS];  // Member disk info
+  BOOLEAN          Assembled;                 // TRUE if already assembled
+} SDP_PENDING_ARRAY;
+
+//
+// Global driver state for event-based BlockIO notification
+//
+typedef struct {
+  LIST_ENTRY  PendingArrayList;     // List of pending arrays by UUID
+  EFI_EVENT   BlockIoNotifyEvent;   // Event for BlockIO notifications
+  VOID        *BlockIoRegistration; // Registration handle
+  EFI_EVENT   WorkerEvent;          // Worker event for assembly (avoid reentry)
+  EFI_EVENT   EndOfDxeEvent;        // Optional: for diagnostics
+} SDP_DRIVER_DATA;
 
 //
 // Array signature: "SDPA" (SDP Array)
@@ -149,6 +195,11 @@ typedef struct {
   //
   EFI_BLOCK_IO_PROTOCOL  BlockIo;     // Virtual BlockIO protocol
   EFI_BLOCK_IO_MEDIA     Media;       // Media information
+
+  //
+  // DiskIO protocol (REQUIRED for PartitionDxe to bind!)
+  //
+  EFI_DISK_IO_PROTOCOL   DiskIo;      // Virtual DiskIO protocol
 
   //
   // Link to controller's array list
